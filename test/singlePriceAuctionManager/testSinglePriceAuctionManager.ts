@@ -89,7 +89,7 @@ describe("TestSinglePriceAuctionManager", function () {
       const balSell = await sellToken.balanceOf(signers.alice)
       expect(balSell).to.equal(970)
 
-      // Alice's BuyToken balance: (10 + 20) S * 1 B / S = 30 B
+      // Alice's BuyToken balance: (10 + 20) S * 1 B/S = 30 B
       const balBuy = await paymentToken.balanceOf(signers.alice)
       expect(balBuy).to.equal(30)
     }
@@ -98,12 +98,28 @@ describe("TestSinglePriceAuctionManager", function () {
     {
       const tx = await managerContract.connect(signers.bob).claimTokens(auctionId)
       await tx.wait();
+
+      // Bob's SellToken balance: 10 
+      const balSell = await sellToken.balanceOf(signers.bob)
+      expect(balSell).to.equal(10)
+
+      // Bob's BuyToken balance: 1000 - 10 = 990
+      const balBuy = await paymentToken.balanceOf(signers.bob)
+      expect(balBuy).to.equal(990)
     }
 
     // Carol withdraws funds.
     {
       const tx = await managerContract.connect(signers.carol).claimTokens(auctionId)
       await tx.wait();
+
+      // Carol's SellToken balance: 20
+      const balSell = await sellToken.balanceOf(signers.carol)
+      expect(balSell).to.equal(20)
+
+      // Carol's BuyToken balance: 1000 - 20 * 1 = 980
+      const balBuy = await paymentToken.balanceOf(signers.carol)
+      expect(balBuy).to.equal(980)
     }
   });
 });
