@@ -4,8 +4,9 @@ pragma solidity ^0.8.24;
 
 import "fhevm/lib/TFHE.sol";
 import "fhevm/config/ZamaFHEVMConfig.sol";
-import "fhevm-contracts/contracts/token/ERC20/IConfidentialERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+// import "fhevm-contracts/contracts/token/ERC20/IConfidentialERC20.sol";
+// import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
     uint256 public auctionCounter;
@@ -15,11 +16,14 @@ contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
         uint256 endTime;
         uint256 totalQuantity;
         uint256 settlementPrice;
+        uint256 refund;
         bool ended;
         IERC20 assetToken;
-        IConfidentialERC20 paymentToken;
+        IERC20 paymentToken; // TODO make this a confidential erc20
         mapping(address => Bid) bids;
         address[] bidders;
+        mapping(address => uint256) payouts;
+        bool paymentClaimed;
     }
 
     struct Bid {
@@ -52,10 +56,10 @@ contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
         auction.endTime = block.timestamp + _auctionDuration;
         auction.totalQuantity = _totalQuantity;
         auction.assetToken = IERC20(_assetToken);
-        auction.paymentToken = IConfidentialERC20(_paymentToken);
+        auction.paymentToken = IERC20(_paymentToken);
 
         // Transfer the assets from the owner to the contract.
-        require(SafeERC20(auction.assetToken).transferFrom(msg.sender, address(this), _totalQuantity), "Asset transfer failed");
+        require(auction.assetToken.transferFrom(msg.sender, address(this), _totalQuantity), "Asset transfer failed");
 
         emit AuctionCreated(auctionId, auction.endTime, _totalQuantity, _assetToken, _paymentToken);
     }
@@ -74,7 +78,24 @@ contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
         require(auction.paymentToken.transferFrom(msg.sender, address(this), totalCost), "Payment transfer failed");
 
         auction.bids[msg.sender] = Bid(_quantity, _price, true);
-        auction.bidders.push(msg.sender);
+        
+        // Insert bidder in sorted order based on price
+        // TODO use linked list to make this insertion operation more efficient
+        bool inserted = false;
+        for (uint256 i = 0; i < auction.bidders.length; i++) {
+            if (_price > auction.bids[auction.bidders[i]].price) {
+            auction.bidders.push(auction.bidders[auction.bidders.length - 1]);
+            for (uint256 j = auction.bidders.length - 1; j > i; j--) {
+                auction.bidders[j] = auction.bidders[j - 1];
+            }
+            auction.bidders[i] = msg.sender;
+            inserted = true;
+            break;
+            }
+        }
+        if (!inserted) {
+            auction.bidders.push(msg.sender);
+        }
 
         emit BidPlaced(auctionId, msg.sender, _quantity, _price);
     }
@@ -83,18 +104,28 @@ contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
         Auction storage auction = auctions[auctionId];
         require(!auction.ended, "Auction already ended");
 
-        // Determine settlement price
+        // Determine settlement price.
+        //
+        // We know that the bidders are already sorted by price, so we can just
+        // go down the list.
         uint256 remainingQuantity = auction.totalQuantity;
         for (uint256 i = 0; i < auction.bidders.length; i++) {
             address bidder = auction.bidders[i];
-            if (auction.bids[bidder].quantity <= remainingQuantity) {
-                remainingQuantity -= auction.bids[bidder].quantity;
+            uint256 bidQuantity = auction.bids[bidder].quantity;
+            
+            if (bidQuantity <= remainingQuantity) {
+                remainingQuantity -= bidQuantity;
+                auction.payouts[bidder] = bidQuantity;
+                auction.settlementPrice = auction.bids[bidder].price;
             } else {
+                remainingQuantity = 0;
+                auction.payouts[bidder] = remainingQuantity;
                 auction.settlementPrice = auction.bids[bidder].price;
                 break;
             }
         }
 
+        auction.refund = remainingQuantity * auction.settlementPrice;
         auction.ended = true;
         emit AuctionEnded(auctionId, auction.settlementPrice);
     }
@@ -102,17 +133,35 @@ contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
     function claimTokens(uint256 auctionId) external auctionEndedOnly(auctionId) {
         Auction storage auction = auctions[auctionId];
         require(auction.ended, "Auction not yet ended");
-        require(auction.bids[msg.sender].exists, "No bid placed");
 
-        uint256 quantity = auction.bids[msg.sender].quantity;
-        uint256 price = auction.settlementPrice;
-        uint256 totalCost = quantity * price;
+        // If auction owner:
+        if (msg.sender == auction.owner) {
+            // Refund remaining assets.
+            require(auction.assetToken.transfer(auction.owner, auction.refund), "Refund transfer failed");
 
-        // Transfer payment from bidder to owner
-        require(auction.paymentToken.transferFrom(msg.sender, auction.owner, totalCost), "Payment transfer failed");
+            // Claim payment.
+            uint256 totalPayment = 0;
+            for (uint256 i = 0; i < auction.bidders.length; i++) {
+                address bidder = auction.bidders[i];
+                totalPayment += auction.payouts[bidder] * auction.settlementPrice;
+            }
+            require(auction.paymentToken.transfer(auction.owner, totalPayment), "Payment transfer failed");
+
+            auction.paymentClaimed = true;
+            return;
+        }
+
+        // If bidder:
+        Bid storage bid = auction.bids[msg.sender];
+        require(bid.exists, "No bid placed");
 
         // Transfer asset from owner to bidder
-        require(auction.assetToken.transfer(msg.sender, quantity), "Asset transfer failed");
+        uint256 payout = auction.payouts[msg.sender];
+        require(auction.assetToken.transfer(msg.sender, payout), "Asset transfer failed");
+
+        // Refund difference between actual cost and prepayment.
+        uint256 refund = bid.quantity * bid.price - payout * auction.settlementPrice;
+        require(auction.paymentToken.transfer(msg.sender, refund), "Refund transfer failed");
 
         // Remove bid
         delete auction.bids[msg.sender];

@@ -6,6 +6,7 @@ import { reencryptEuint64 } from "../reencrypt";
 import { getSigners, initSigners } from "../signers";
 import { debug } from "../utils";
 import { deployConfidentialERC20Fixture } from "./ConfidentialERC20.fixture";
+import { FhevmInstance } from "fhevmjs/node";
 
 describe("ConfidentialERC20", function () {
   before(async function () {
@@ -44,7 +45,8 @@ describe("ConfidentialERC20", function () {
     const t1 = await transaction.wait();
     expect(t1?.status).to.eq(1);
 
-    const input = this.fhevm.createEncryptedInput(this.contractAddress, this.signers.alice.address);
+    const fhevm = this.fhevm as FhevmInstance;
+    const input = fhevm.createEncryptedInput(this.contractAddress, this.signers.alice.address);
     input.add64(1337);
     const encryptedTransferAmount = await input.encrypt();
     const tx = await this.erc20["transfer(address,bytes32,bytes)"](
@@ -73,12 +75,12 @@ describe("ConfidentialERC20", function () {
     // on the other hand, Bob should be unable to read Alice's balance
     await expect(
       reencryptEuint64(this.signers.bob, this.fhevm, balanceHandleAlice, this.contractAddress),
-    ).to.be.rejectedWith("User is not authorized to reencrypt this handle!");
+    ).to.be.revertedWith("User is not authorized to reencrypt this handle!");
 
     // and should be impossible to call reencrypt if contractAddress === userAddress
     await expect(
       reencryptEuint64(this.signers.alice, this.fhevm, balanceHandleAlice, this.signers.alice.address),
-    ).to.be.rejectedWith("userAddress should not be equal to contractAddress when requesting reencryption!");
+    ).to.be.revertedWith("userAddress should not be equal to contractAddress when requesting reencryption!");
   });
 
   it("should not transfer tokens between two users", async function () {

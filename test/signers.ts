@@ -5,9 +5,7 @@ import { ACCOUNT_NAMES } from "./constants";
 
 type AccountNames = (typeof ACCOUNT_NAMES)[number];
 
-export interface Signers {
-  [K in AccountNames]: HardhatEthersSigner;
-}
+export type Signers = Record<AccountNames, HardhatEthersSigner>;
 
 const signers: Signers = {} as Signers;
 
@@ -21,6 +19,6 @@ export const initSigners = async (): Promise<void> => {
   }
 };
 
-export const getSigners = async (): Promise<Signers> => {
+export const getSigners = (): Signers => {
   return signers;
 };
