@@ -1,5 +1,5 @@
 import "@nomicfoundation/hardhat-toolbox";
-import dotenv from "dotenv";
+import 'dotenv/config'
 import "hardhat-deploy";
 import "hardhat-ignore-warnings";
 import { HardhatUserConfig, extendProvider } from "hardhat/config";
@@ -17,8 +17,6 @@ extendProvider(async (provider) => {
   const newProvider = new CustomProvider(provider);
   return newProvider;
 });
-
-dotenv.config();
 
 // Ensure that we have all the environment variables we need.
 const mnemonic: string = process.env.MNEMONIC!;
