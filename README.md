@@ -1,3 +1,18 @@
+# Zama Bounty Program Season 7: Single Price Confidential Auction
+
+https://github.com/zama-ai/bounty-program/issues/136
+
+```
+pnpm install
+pnpm compile
+pnpm test
+```
+
+Relevant files:
+- Contract: `contracts/SinglePriceAuctionManager.sol`
+- Test: `test/testSinglePriceAuctionManager.ts`
+
+
 # Hardhat Template [![Open in Gitpod][gitpod-badge]][gitpod] [![Github Actions][gha-badge]][gha] [![Hardhat][hardhat-badge]][hardhat] [![License: MIT][license-badge]][license]
 
 [gitpod]: https://gitpod.io/#https://github.com/zama-ai/fhevm-hardhat-template
