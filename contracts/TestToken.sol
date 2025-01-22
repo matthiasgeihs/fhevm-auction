@@ -2,13 +2,10 @@
 
 pragma solidity ^0.8.24;
 
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "fhevm/lib/TFHE.sol";
+import "fhevm/config/ZamaFHEVMConfig.sol";
+import "fhevm-contracts/contracts/token/ERC20/extensions/ConfidentialERC20Mintable.sol";
 
-
-contract TestToken is ERC20 {
-    constructor() ERC20("TestToken", "TST") {}
-
-    function mint(address to, uint256 amount) public {
-        _mint(to, amount);
-    }
+contract TestToken is SepoliaZamaFHEVMConfig, ConfidentialERC20Mintable {
+    constructor(string memory name_, string memory symbol_) ConfidentialERC20Mintable(name_, symbol_, msg.sender) {}
 }
