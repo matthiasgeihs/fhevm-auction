@@ -6,6 +6,7 @@ import { FhevmInstance } from "fhevmjs/node";
 import { getSigners, initSigners, Signers } from "../signers";
 import { SinglePriceAuctionManager, TestToken } from "../../types";
 import { reencryptEuint64 } from "../reencrypt";
+import { awaitAllDecryptionResults } from "../asyncDecrypt";
 
 describe("TestSinglePriceAuctionManager", function () {
   let signers: Signers
@@ -85,9 +86,18 @@ describe("TestSinglePriceAuctionManager", function () {
       )
       await tx.wait();
     }
+    const auctionId = await managerContract.auctionCounter();
+
+    // Check total quantity in the clear.
+    {
+      const tx = await managerContract.decryptTotalQuantity(auctionId);
+      await tx.wait();
+      await awaitAllDecryptionResults();
+      const totalQuantity = (await managerContract.auctions(auctionId)).totalQuantityClear;
+      expect(totalQuantity).to.equal(100);
+    }
 
     // Bob bids on 10 sell tokens for price 1.
-    const auctionId = await managerContract.auctionCounter();
     {
       const input = fhevm.createEncryptedInput(await managerContract.getAddress(), signers.bob.address);
       input.add64(10); // quantity

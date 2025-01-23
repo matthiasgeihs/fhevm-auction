@@ -7,18 +7,22 @@ import "fhevm/config/ZamaFHEVMConfig.sol";
 import "fhevm-contracts/contracts/token/ERC20/IConfidentialERC20.sol";
 import "./SafeConfidentialERC20.sol";
 
+import { SepoliaZamaGatewayConfig } from "fhevm/config/ZamaGatewayConfig.sol";
+import "fhevm/gateway/GatewayCaller.sol";
+
 /**
  * @title SinglePriceAuctionManager
  * @notice Contract for creating and bidding on confidential single-price
  * auctions.
  */
-contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
+contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig, SepoliaZamaGatewayConfig, GatewayCaller {
     uint256 public auctionCounter;
 
     struct Auction {
         address owner;
         uint256 endTime;
         euint64 totalQuantity;
+        uint256 totalQuantityClear;
         euint64 settlementPrice;
         euint64 refund;
         bool ended;
@@ -67,8 +71,9 @@ contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
      * Create a new auction.
      *
      * Emits an `AuctionCreated` event. The emitted quantity is the target
-     * quantity, assuming the seller has sufficient balance. The actually sold
-     * quantity is the minimum of the target quantity and the seller's balance.
+     * quantity, assuming the seller has sufficient balance. If the seller has
+     * insufficient balance, the quantity is set to 0. The actual quantity can
+     * be decrypted using the `decryptTotalQuantity` function.
      *
      * @param _auctionDuration Duration of the auction in seconds.
      * @param _totalQuantity Total quantity of the assets being auctioned.
@@ -103,9 +108,27 @@ contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
         // Persist access to stored values
         TFHE.allowThis(auction.totalQuantity);
 
-        /// @dev We could decrypt the real quantity and publish that, but it is
-        /// more efficient to just publish the target quantity.
+        // Emit event
         emit AuctionCreated(auctionId, auction.endTime, _totalQuantity, _assetToken, _paymentToken);
+    }
+
+    function decryptTotalQuantity(uint256 auctionId) public {
+        uint256[] memory cts = new uint256[](1);
+        cts[0] = Gateway.toUint256(auctions[auctionId].totalQuantity);
+        uint256 requestId = Gateway.requestDecryption(
+            cts,
+            this.decryptTotalQuantityCallback.selector,
+            0,
+            block.timestamp + 100,
+            false
+        );
+        addParamsUint256(requestId, auctionId);
+    }
+
+    function decryptTotalQuantityCallback(uint256 requestID, uint64 quantity) public onlyGateway {
+        uint256[] memory params = getParamsUint256(requestID);
+        uint256 auctionId = params[0];
+        auctions[auctionId].totalQuantityClear = quantity;
     }
 
     /**
