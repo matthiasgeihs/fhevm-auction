@@ -5,16 +5,20 @@ pragma solidity ^0.8.24;
 import "fhevm/lib/TFHE.sol";
 import "fhevm/config/ZamaFHEVMConfig.sol";
 import "fhevm-contracts/contracts/token/ERC20/IConfidentialERC20.sol";
-// import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "./SafeConfidentialERC20.sol";
 
+/**
+ * @title SinglePriceAuctionManager
+ * @notice Contract for creating and bidding on confidential single-price
+ * auctions.
+ */
 contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
     uint256 public auctionCounter;
 
     struct Auction {
         address owner;
         uint256 endTime;
-        uint256 totalQuantity;
+        euint64 totalQuantity;
         euint64 settlementPrice;
         euint64 refund;
         bool ended;
@@ -42,7 +46,7 @@ contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
     event AuctionCreated(
         uint256 auctionId,
         uint256 endTime,
-        uint256 quantity,
+        uint256 targetQuantity,
         address assetToken,
         address paymentToken
     );
@@ -59,6 +63,18 @@ contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
         _;
     }
 
+    /**
+     * Create a new auction.
+     *
+     * Emits an `AuctionCreated` event. The emitted quantity is the target
+     * quantity, assuming the seller has sufficient balance. The actually sold
+     * quantity is the minimum of the target quantity and the seller's balance.
+     *
+     * @param _auctionDuration Duration of the auction in seconds.
+     * @param _totalQuantity Total quantity of the assets being auctioned.
+     * @param _assetToken Address of the asset token.
+     * @param _paymentToken Address of the payment token.
+     */
     function createAuction(
         uint256 _auctionDuration,
         uint64 _totalQuantity,
@@ -70,21 +86,37 @@ contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
         Auction storage auction = auctions[auctionId];
         auction.owner = msg.sender;
         auction.endTime = block.timestamp + _auctionDuration;
-        auction.totalQuantity = _totalQuantity;
         auction.assetToken = IConfidentialERC20(_assetToken);
         auction.paymentToken = IConfidentialERC20(_paymentToken);
 
         // Transfer the assets from the owner to the contract.
         euint64 _totalQuantityEncrypted = TFHE.asEuint64(_totalQuantity);
         TFHE.allowTransient(_totalQuantityEncrypted, address(auction.assetToken));
-        require(
-            auction.assetToken.transferFrom(msg.sender, address(this), _totalQuantityEncrypted),
-            "Asset transfer failed"
+        ebool ok = SafeConfidentialERC20.safeTransferFrom(
+            auction.assetToken,
+            msg.sender,
+            address(this),
+            _totalQuantityEncrypted
         );
+        auction.totalQuantity = TFHE.select(ok, _totalQuantityEncrypted, TFHE.asEuint64(0));
 
+        // Persist access to stored values
+        TFHE.allowThis(auction.totalQuantity);
+
+        /// @dev We could decrypt the real quantity and publish that, but it is
+        /// more efficient to just publish the target quantity.
         emit AuctionCreated(auctionId, auction.endTime, _totalQuantity, _assetToken, _paymentToken);
     }
 
+    /**
+     * Place a new bid. Bidder is msg.sender. Payment will be locked until
+     * auction end. One address can place multiple competing bids.
+     *
+     * @param _auctionId Auction identifier.
+     * @param _quantity Quantity to bid.
+     * @param _price Price per unit.
+     * @param _proof Proof of quantity and price.
+     */
     function placeBid(
         uint256 _auctionId,
         einput _quantity,
@@ -93,17 +125,20 @@ contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
     ) external auctionActive(_auctionId) {
         Auction storage auction = auctions[_auctionId];
 
-        // TODO handle multiple bids from one address
-
         eaddress bidder = TFHE.asEaddress(msg.sender);
         euint64 quantity = TFHE.asEuint64(_quantity, _proof);
         euint64 price = TFHE.asEuint64(_price, _proof);
 
         euint64 totalCost = TFHE.mul(quantity, price);
 
-        // Transfer payment from bidder to contract using confidential transfer
+        // Transfer payment from bidder to contract using confidential transfer.
+        // If the transfer fails, set the quantity to 0.
+        //
+        // @dev We could check this through decryption, but it is more
+        // privacy-preserving and efficient to just check obliviously here.
         TFHE.allowTransient(totalCost, address(auction.paymentToken));
-        require(auction.paymentToken.transferFrom(msg.sender, address(this), totalCost), "Payment transfer failed");
+        ebool ok = SafeConfidentialERC20.safeTransferFrom(auction.paymentToken, msg.sender, address(this), totalCost);
+        quantity = TFHE.select(ok, quantity, TFHE.asEuint64(0));
 
         // Insert bidder in sorted order based on price (descending order)
         euint16 insertIndex = TFHE.asEuint16(auction.bids.length);
@@ -153,6 +188,15 @@ contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
         emit BidPlaced(_auctionId, msg.sender, quantity, price);
     }
 
+    /**
+     * End an auction. The price is determined by the lowest of the top bids
+     * that are needed to cover the amount. First come, first serve. If the
+     * order is not filled completely, the remaining quantity is refunded to
+     * the seller. Overpayment is refunded. Payouts and refunds are to be
+     * claimed through the `claimPayouts` function.
+     *
+     * @param auctionId Auction identifier.
+     */
     function endAuction(uint256 auctionId) external auctionEndedOnly(auctionId) {
         Auction storage auction = auctions[auctionId];
         require(!auction.ended, "Auction already ended");
@@ -161,7 +205,7 @@ contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
         //
         // We know that the bidders are already sorted by price, so we can just
         // go down the list.
-        euint64 remainingQuantity = TFHE.asEuint64(auction.totalQuantity);
+        euint64 remainingQuantity = auction.totalQuantity;
         euint64 settlementPrice = TFHE.asEuint64(0);
         for (uint256 i = 0; i < auction.bids.length; i++) {
             eaddress bidder = auction.bids[i].bidder;
@@ -224,6 +268,13 @@ contract SinglePriceAuctionManager is SepoliaZamaFHEVMConfig {
         emit AuctionEnded(auctionId, auction.settlementPrice);
     }
 
+    /**
+     * Claim the tokens of an auction. For the seller, the remaining assets are
+     * refunded and the payment is claimed. For the buyers, the corresponding
+     * payouts are claimed and any overpayment is refunded.
+     *
+     * @param auctionId Auction identifier.
+     */
     function claimTokens(uint256 auctionId) external auctionEndedOnly(auctionId) {
         Auction storage auction = auctions[auctionId];
         require(auction.ended, "Auction not yet ended");
